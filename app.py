@@ -17,6 +17,7 @@ from fetcher import (
     fetch_papers,
     is_valid_category,
     papers_to_markdown,
+    resolve_categories,
     resolve_category,
 )
 from presets import (
@@ -85,6 +86,68 @@ def _category_to_label(code: str) -> str:
     return code
 
 
+def _parse_custom_codes(raw: str) -> list[str]:
+    return [c.strip() for c in raw.replace(";", ",").split(",") if c.strip()]
+
+
+def _codes_from_labels_and_custom(labels: list[str], custom_raw: str) -> list[str]:
+    codes = [CATEGORIES[l] for l in labels if l in CATEGORIES]
+    codes.extend(_parse_custom_codes(custom_raw))
+    return resolve_categories(codes)
+
+
+def _run_fetch(
+    *,
+    categories: list[str],
+    keywords: list[str],
+    keyword_mode: str,
+    target: date,
+    days: int,
+    source: str,
+    max_results: int,
+    preset_name: str | None = None,
+) -> None:
+    cat_text = ", ".join(categories)
+    with st.spinner(f"正在拉取 {cat_text} …"):
+        try:
+            papers = fetch_papers(
+                categories=categories,
+                keywords=keywords,
+                keyword_mode=keyword_mode,
+                target_date=target,
+                days=days,
+                source=source,
+                max_results=max_results,
+            )
+            st.session_state.papers = papers
+            st.session_state.last_query = {
+                "category": cat_text,
+                "categories": categories,
+                "date": str(target),
+                "days": days,
+                "keywords": keywords,
+                "preset_name": preset_name,
+            }
+        except Exception as e:
+            st.error(f"拉取失败：{e}")
+
+
+def _render_preset_keywords(keywords: list[str]) -> None:
+    if not keywords:
+        st.caption("尚未添加关键词。")
+        return
+    chips = "".join(f'<span class="kw-chip">{escape(k)}</span>' for k in keywords)
+    st.markdown(chips, unsafe_allow_html=True)
+
+
+def _render_category_chips(codes: list[str]) -> None:
+    if not codes:
+        st.caption("尚未选择主题。")
+        return
+    chips = "".join(f'<span class="kw-chip">{escape(c)}</span>' for c in codes)
+    st.markdown(chips, unsafe_allow_html=True)
+
+
 def _render_paper(p: Paper, idx: int) -> None:
     authors = ", ".join(p.authors[:6])
     if len(p.authors) > 6:
@@ -107,48 +170,6 @@ def _render_paper(p: Paper, idx: int) -> None:
     c1, c2, _ = st.columns([1, 1, 6])
     c1.link_button("摘要页", p.abs_url, use_container_width=True)
     c2.link_button("PDF", p.pdf_url, use_container_width=True)
-
-
-def _run_fetch(
-    *,
-    category: str,
-    keywords: list[str],
-    keyword_mode: str,
-    target: date,
-    days: int,
-    source: str,
-    max_results: int,
-    preset_name: str | None = None,
-) -> None:
-    with st.spinner(f"正在拉取 {category} …"):
-        try:
-            papers = fetch_papers(
-                category=category,
-                keywords=keywords,
-                keyword_mode=keyword_mode,
-                target_date=target,
-                days=days,
-                source=source,
-                max_results=max_results,
-            )
-            st.session_state.papers = papers
-            st.session_state.last_query = {
-                "category": category,
-                "date": str(target),
-                "days": days,
-                "keywords": keywords,
-                "preset_name": preset_name,
-            }
-        except Exception as e:
-            st.error(f"拉取失败：{e}")
-
-
-def _render_preset_keywords(keywords: list[str]) -> None:
-    if not keywords:
-        st.caption("尚未添加关键词。")
-        return
-    chips = "".join(f'<span class="kw-chip">{escape(k)}</span>' for k in keywords)
-    st.markdown(chips, unsafe_allow_html=True)
 
 
 def _sidebar_presets(store: dict) -> None:
@@ -177,19 +198,22 @@ def _sidebar_presets(store: dict) -> None:
         preset = get_preset(store, selected_id)
         assert preset is not None
 
-        cat_code = resolve_category(
-            preset.get("category", ""),
-            preset.get("category_label", ""),
+        cat_codes = resolve_categories(
+            preset.get("categories") or preset.get("category"),
+            preset.get("category_labels") or preset.get("category_label") or preset.get("name"),
         )
-        st.write("**主题代码：**", cat_code)
-        if not is_valid_category(cat_code):
+        st.write("**主题代码：**")
+        _render_category_chips(cat_codes)
+        bad = [c for c in cat_codes if not is_valid_category(c)]
+        if not cat_codes:
+            st.error("尚未选择主题，请在编辑里至少选一个。")
+        elif bad:
             st.error(
-                f"分类代码无效：{cat_code!r}。请点下方「编辑此固定分类」，"
-                "重新选择「凝聚态 (cond-mat)」并保存。"
+                f"分类代码无效：{bad!r}。请点下方「编辑此固定分类」重新选择并保存。"
             )
-        elif cat_code != preset.get("category"):
-            st.warning(f"已自动纠正分类：{preset.get('category')!r} → {cat_code}")
-            preset["category"] = cat_code
+        elif cat_codes != list(preset.get("categories") or []):
+            st.warning(f"已自动纠正主题列表。")
+            preset["categories"] = cat_codes
             upsert_preset(store, preset)
 
         st.markdown("**关键词：**")
@@ -201,7 +225,7 @@ def _sidebar_presets(store: dict) -> None:
 
         if st.button("一键筛选", type="primary", use_container_width=True, key="preset_fetch"):
             _run_fetch(
-                category=cat_code,
+                categories=cat_codes,
                 keywords=list(preset.get("keywords") or []),
                 keyword_mode=preset.get("keyword_mode", "any"),
                 target=arxiv_today(),
@@ -222,22 +246,33 @@ def _edit_preset_form(store: dict, preset: dict) -> None:
     pid = preset["id"]
     name = st.text_input("名称", value=preset["name"], key=f"edit_name_{pid}")
 
-    labels = list(CATEGORIES.keys())
-    current_label = preset.get("category_label") or _category_to_label(preset["category"])
-    if current_label not in labels:
-        labels = [current_label, *labels]
-    cat_label = st.selectbox(
-        "主题分类",
-        labels,
-        index=labels.index(current_label) if current_label in labels else 0,
-        key=f"edit_cat_{pid}",
+    all_labels = list(CATEGORIES.keys())
+    current_codes = resolve_categories(
+        preset.get("categories") or preset.get("category"),
+        preset.get("category_labels") or preset.get("category_label"),
     )
+    default_labels = [_category_to_label(c) for c in current_codes]
+    default_labels = [l for l in default_labels if l in all_labels]
+    if not default_labels and current_codes:
+        # 自定义代码不在列表里时，默认不预勾选下拉项
+        default_labels = []
+
+    selected_labels = st.multiselect(
+        "主题分类（可多选）",
+        options=all_labels,
+        default=default_labels,
+        key=f"edit_cats_{pid}",
+        help="可同时选择多个 arXiv 主题，结果会合并去重。",
+    )
+    known_codes = {CATEGORIES[l] for l in default_labels}
+    custom_default = ", ".join(c for c in current_codes if c not in known_codes)
     custom_cat = st.text_input(
-        "自定义分类代码（可选）",
-        value="" if preset["category"] in CATEGORIES.values() else preset["category"],
+        "额外自定义分类代码（可选，逗号分隔）",
+        value=custom_default,
+        placeholder="例如 quant-ph, hep-th",
         key=f"edit_custom_{pid}",
     )
-    category = custom_cat.strip() or _label_to_category(cat_label)
+    categories = _codes_from_labels_and_custom(selected_labels, custom_cat)
 
     st.markdown("**关键词列表**")
     keywords = list(preset.get("keywords") or [])
@@ -312,13 +347,18 @@ def _edit_preset_form(store: dict, preset: dict) -> None:
 
     b1, b2 = st.columns(2)
     if b1.button("保存修改", type="primary", use_container_width=True, key=f"save_{pid}"):
-        resolved = resolve_category(category, cat_label)
-        if not is_valid_category(resolved):
-            st.error(f"分类代码无效：{resolved!r}，请从下拉框选择标准主题。")
+        if not categories:
+            st.error("请至少选择一个主题。")
+        elif any(not is_valid_category(c) for c in categories):
+            st.error(f"存在无效分类代码：{categories!r}")
         else:
             preset["name"] = name.strip() or preset["name"]
-            preset["category"] = resolved
-            preset["category_label"] = cat_label if not custom_cat.strip() else resolved
+            preset["categories"] = categories
+            preset["category_labels"] = [
+                _category_to_label(c) for c in categories
+            ]
+            preset["category"] = categories[0]
+            preset["category_label"] = preset["category_labels"][0]
             preset["keywords"] = keywords
             preset["keyword_mode"] = keyword_mode
             preset["days"] = days
@@ -326,7 +366,7 @@ def _edit_preset_form(store: dict, preset: dict) -> None:
             preset["max_results"] = max_results
             upsert_preset(store, preset)
             set_last_preset(store, pid)
-            st.success(f"已保存（主题代码 {resolved}）。")
+            st.success(f"已保存（主题 {', '.join(categories)}）。")
             st.rerun()
 
     if b2.button("删除此分类", use_container_width=True, key=f"delete_{pid}"):
@@ -336,9 +376,19 @@ def _edit_preset_form(store: dict, preset: dict) -> None:
 
 def _create_preset_form(store: dict) -> None:
     name = st.text_input("名称", value="我的研究兴趣", key="new_preset_name")
-    cat_label = st.selectbox("主题分类", list(CATEGORIES.keys()), index=1, key="new_cat")
-    custom_cat = st.text_input("自定义分类代码（可选）", key="new_custom")
-    category = custom_cat.strip() or CATEGORIES[cat_label]
+    selected_labels = st.multiselect(
+        "主题分类（可多选）",
+        options=list(CATEGORIES.keys()),
+        default=["机器学习 (cs.LG)"],
+        key="new_cats",
+        help="可同时选择多个 arXiv 主题。",
+    )
+    custom_cat = st.text_input(
+        "额外自定义分类代码（可选，逗号分隔）",
+        placeholder="例如 quant-ph, hep-th",
+        key="new_custom",
+    )
+    categories = _codes_from_labels_and_custom(selected_labels, custom_cat)
     kw_raw = st.text_input(
         "初始关键词（逗号分隔）",
         placeholder="spintronics, van der Waals, neuromorphic",
@@ -355,36 +405,40 @@ def _create_preset_form(store: dict) -> None:
     days = st.slider("回溯天数", 1, 7, 2, key="new_days")
 
     if st.button("创建固定分类", type="primary", use_container_width=True, key="create_preset"):
-        resolved = resolve_category(category, cat_label)
-        if not is_valid_category(resolved):
-            st.error(f"分类代码无效：{resolved!r}，请从下拉框选择标准主题。")
+        if not categories:
+            st.error("请至少选择一个主题。")
+        elif any(not is_valid_category(c) for c in categories):
+            st.error(f"存在无效分类代码：{categories!r}")
         else:
             create_preset(
                 store,
                 name=name,
-                category=resolved,
-                category_label=cat_label if not custom_cat.strip() else resolved,
+                categories=categories,
+                category_labels=[_category_to_label(c) for c in categories],
                 keywords=keywords,
                 keyword_mode=keyword_mode,
                 days=days,
             )
-            st.success(f"已创建「{name}」（主题 {resolved}）。")
+            st.success(f"已创建「{name}」（主题 {', '.join(categories)}）。")
             st.rerun()
 
 
 def _sidebar_manual(store: dict) -> None:
     st.subheader("手动筛选")
-    cat_label = st.selectbox("主题分类", list(CATEGORIES.keys()), index=1, key="manual_cat")
-    category = CATEGORIES[cat_label]
-
+    selected_labels = st.multiselect(
+        "主题分类（可多选）",
+        options=list(CATEGORIES.keys()),
+        default=["机器学习 (cs.LG)"],
+        key="manual_cats",
+        help="可同时选择多个 arXiv 主题，结果会合并去重。",
+    )
     custom_cat = st.text_input(
-        "自定义分类代码（可选）",
-        placeholder="例如 cs.LG 或 hep-th",
-        help="填写后优先使用自定义分类，覆盖上方选择。",
+        "额外自定义分类代码（可选，逗号分隔）",
+        placeholder="例如 cs.LG, hep-th",
+        help="可追加不在上方列表中的分类代码。",
         key="manual_custom",
     )
-    if custom_cat.strip():
-        category = custom_cat.strip()
+    categories = _codes_from_labels_and_custom(selected_labels, custom_cat)
 
     today = arxiv_today()
     target = st.date_input("目标日期（arXiv 东部时区）", value=today, key="manual_date")
@@ -424,30 +478,36 @@ def _sidebar_manual(store: dict) -> None:
     max_results = st.slider("API 最大条数", 20, 300, 100, 20, key="manual_max")
 
     if st.button("获取论文", type="primary", use_container_width=True, key="manual_fetch"):
-        _run_fetch(
-            category=category,
-            keywords=keywords,
-            keyword_mode=keyword_mode,
-            target=target,
-            days=days,
-            source=source,
-            max_results=max_results,
-        )
+        if not categories:
+            st.error("请至少选择一个主题。")
+        else:
+            _run_fetch(
+                categories=categories,
+                keywords=keywords,
+                keyword_mode=keyword_mode,
+                target=target,
+                days=days,
+                source=source,
+                max_results=max_results,
+            )
 
     save_name = st.text_input("保存为固定分类（名称）", key="save_as_name")
     if st.button("保存当前条件为固定分类", use_container_width=True, key="save_as_preset"):
-        create_preset(
-            store,
-            name=save_name.strip() or "未命名固定分类",
-            category=category,
-            category_label=cat_label if not custom_cat.strip() else category,
-            keywords=keywords,
-            keyword_mode=keyword_mode,
-            days=days,
-            source=source,
-            max_results=max_results,
-        )
-        st.success("已保存为固定分类，可在上方切换到「固定分类」使用。")
+        if not categories:
+            st.error("请至少选择一个主题。")
+        else:
+            create_preset(
+                store,
+                name=save_name.strip() or "未命名固定分类",
+                categories=categories,
+                category_labels=[_category_to_label(c) for c in categories],
+                keywords=keywords,
+                keyword_mode=keyword_mode,
+                days=days,
+                source=source,
+                max_results=max_results,
+            )
+            st.success("已保存为固定分类，可在上方切换到「固定分类」使用。")
 
 
 def main() -> None:
@@ -485,7 +545,7 @@ def main() -> None:
 **固定分类怎么用**
 1. 左侧选「固定分类」→「新建固定分类」，填入主题和关键词并创建  
 2. 之后每次进入，选中该分类，点「一键筛选」即可  
-3. 在「编辑此固定分类」里可随时增加 / 删除关键词，或改主题  
+3. 在「编辑此固定分类」里可多选主题，并增加 / 删除关键词  
 
 **说明**
 - arXiv 按美国东部时间发布，工作日傍晚左右更新新帖公告  

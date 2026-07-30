@@ -8,7 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from fetcher import resolve_category
+from fetcher import CATEGORIES, resolve_categories, resolve_category
 
 PRESETS_PATH = Path(__file__).resolve().parent / "presets.json"
 
@@ -25,6 +25,8 @@ def _empty_preset(name: str = "我的固定分类") -> dict[str, Any]:
         "name": name,
         "category": "cs.LG",
         "category_label": "机器学习 (cs.LG)",
+        "categories": ["cs.LG"],
+        "category_labels": ["机器学习 (cs.LG)"],
         "keywords": [],
         "keyword_mode": "any",
         "days": 2,
@@ -33,21 +35,47 @@ def _empty_preset(name: str = "我的固定分类") -> dict[str, Any]:
     }
 
 
+def _labels_for_codes(codes: list[str]) -> list[str]:
+    code_to_label = {code: label for label, code in CATEGORIES.items()}
+    return [code_to_label.get(c, c) for c in codes]
+
+
 def _normalize_preset(p: dict[str, Any]) -> dict[str, Any]:
     base = _empty_preset()
-    base.update({k: v for k, v in p.items() if k in base})
+    # 先合并旧字段
+    for k, v in p.items():
+        if k in base or k in ("categories", "category_labels"):
+            base[k] = v
+
     if not base.get("id"):
         base["id"] = uuid.uuid4().hex[:12]
     if not isinstance(base.get("keywords"), list):
         base["keywords"] = []
     base["keywords"] = [str(k).strip() for k in base["keywords"] if str(k).strip()]
-    # 纠正错误分类代码（如误存成 01、中文名等）
-    base["category"] = resolve_category(
-        base.get("category", ""),
-        base.get("category_label", "") or base.get("name", ""),
-    )
-    if base.get("name") and not base.get("category_label"):
-        base["category_label"] = base["name"]
+
+    # 兼容旧版单主题 -> 多主题
+    raw_cats = base.get("categories")
+    if not isinstance(raw_cats, list) or not raw_cats:
+        raw_cats = [base.get("category") or "cs.LG"]
+    raw_labels = base.get("category_labels")
+    if not isinstance(raw_labels, list) or not raw_labels:
+        raw_labels = [base.get("category_label") or base.get("name") or ""]
+
+    codes = resolve_categories(raw_cats, raw_labels)
+    if not codes:
+        codes = ["cs.LG"]
+    labels = _labels_for_codes(codes)
+    # 若原 labels 更完整则尽量保留展示名
+    if isinstance(base.get("category_labels"), list) and len(base["category_labels"]) == len(codes):
+        labels = [
+            old if old else new
+            for old, new in zip(base["category_labels"], labels)
+        ]
+
+    base["categories"] = codes
+    base["category_labels"] = labels
+    base["category"] = codes[0]
+    base["category_label"] = labels[0]
     return base
 
 
@@ -128,8 +156,10 @@ def create_preset(
     store: dict[str, Any],
     name: str,
     *,
-    category: str = "cs.LG",
+    category: str | None = None,
     category_label: str = "",
+    categories: list[str] | None = None,
+    category_labels: list[str] | None = None,
     keywords: list[str] | None = None,
     keyword_mode: str = "any",
     days: int = 2,
@@ -137,8 +167,20 @@ def create_preset(
     max_results: int = 100,
 ) -> dict[str, Any]:
     preset = _empty_preset(name.strip() or "我的固定分类")
-    preset["category"] = resolve_category(category, category_label or name)
-    preset["category_label"] = category_label or category
+    cats = resolve_categories(
+        categories if categories is not None else (category or "cs.LG"),
+        category_labels if category_labels is not None else category_label,
+    )
+    if not cats:
+        cats = [resolve_category(category or "cs.LG", category_label or name)]
+    labels = category_labels or _labels_for_codes(cats)
+    if len(labels) != len(cats):
+        labels = _labels_for_codes(cats)
+
+    preset["categories"] = cats
+    preset["category_labels"] = labels
+    preset["category"] = cats[0]
+    preset["category_label"] = labels[0]
     preset["keywords"] = [k.strip() for k in (keywords or []) if k.strip()]
     preset["keyword_mode"] = keyword_mode
     preset["days"] = days

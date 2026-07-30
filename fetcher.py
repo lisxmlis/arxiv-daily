@@ -108,20 +108,57 @@ def resolve_category(category: str, category_label: str = "") -> str:
     return raw
 
 
+def resolve_categories(
+    categories: str | list[str] | None,
+    category_labels: str | list[str] | None = None,
+) -> list[str]:
+    """解析并去重多个分类代码，保持顺序。"""
+    if categories is None:
+        cats = []
+    elif isinstance(categories, str):
+        cats = [c.strip() for c in categories.replace(";", ",").split(",") if c.strip()]
+    else:
+        cats = [str(c).strip() for c in categories if str(c).strip()]
+
+    if category_labels is None:
+        labels: list[str] = []
+    elif isinstance(category_labels, str):
+        labels = [category_labels]
+    else:
+        labels = [str(x) for x in category_labels]
+
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for i, cat in enumerate(cats):
+        label = labels[i] if i < len(labels) else (labels[0] if labels else "")
+        code = resolve_category(cat, label)
+        if code and code not in seen:
+            seen.add(code)
+            resolved.append(code)
+    return resolved
+
+
 def is_valid_category(category: str) -> bool:
     return bool(_ARXIV_CAT_RE.match((category or "").strip()))
 
 
-def api_category_clause(category: str) -> str:
-    """构造 API 分类子句；一级 archive 使用 cat:xxx.* 覆盖子类。"""
-    cat = resolve_category(category)
-    if cat in PARENT_ARCHIVES:
-        return f"cat:{cat}.*"
-    if cat.endswith(".*"):
-        return f"cat:{cat}"
-    # cs.LG 等叶子分类
-    return f"cat:{cat}"
+def api_category_clause(category: str | list[str]) -> str:
+    """构造 API 分类子句；一级 archive 使用 cat:xxx.* 覆盖子类；多主题用 OR。"""
+    cats = resolve_categories(category)
+    if not cats:
+        raise ValueError("至少需要一个有效主题分类。")
 
+    parts = []
+    for cat in cats:
+        if cat in PARENT_ARCHIVES:
+            parts.append(f"cat:{cat}.*")
+        elif cat.endswith(".*"):
+            parts.append(f"cat:{cat}")
+        else:
+            parts.append(f"cat:{cat}")
+    if len(parts) == 1:
+        return parts[0]
+    return "(" + " OR ".join(parts) + ")"
 
 @dataclass
 class Paper:
@@ -209,82 +246,85 @@ def _result_to_paper(result: arxiv.Result) -> Paper:
     )
 
 
-def fetch_from_rss(category: str, days: int = 1) -> list[Paper]:
+def fetch_from_rss(category: str | list[str], days: int = 1) -> list[Paper]:
     """
-    通过 arXiv RSS 获取某分类的新论文（优先 new 公告源）。
+    通过 arXiv RSS 获取某分类（可多个）的新论文。
     days>1 时回退到 recent 源并按日期过滤。
     """
-    category = resolve_category(category)
-    urls = [RSS_NEW.format(category=category)]
-    if days > 1:
-        urls.append(RSS_RECENT.format(category=category))
+    categories = resolve_categories(category)
+    if not categories:
+        return []
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     seen: set[str] = set()
     papers: list[Paper] = []
 
-    for url in urls:
-        feed = feedparser.parse(url)
-        for entry in feed.entries:
-            link = getattr(entry, "link", "") or ""
-            if not link:
-                continue
-            arxiv_id = _id_from_link(link)
-            if arxiv_id in seen:
-                continue
+    for category in categories:
+        urls = [RSS_NEW.format(category=category)]
+        if days > 1:
+            urls.append(RSS_RECENT.format(category=category))
 
-            published = None
-            if getattr(entry, "published_parsed", None):
-                t = entry.published_parsed
-                published = datetime(*t[:6], tzinfo=timezone.utc)
-            else:
-                published = _parse_feed_datetime(getattr(entry, "published", None))
-
-            updated = published
-            if getattr(entry, "updated_parsed", None):
-                t = entry.updated_parsed
-                updated = datetime(*t[:6], tzinfo=timezone.utc)
-
-            if published and published < cutoff and days >= 1:
-                if "show=" in url:
+        for url in urls:
+            feed = feedparser.parse(url)
+            for entry in feed.entries:
+                link = getattr(entry, "link", "") or ""
+                if not link:
+                    continue
+                arxiv_id = _id_from_link(link)
+                if arxiv_id in seen:
                     continue
 
-            title = (getattr(entry, "title", "") or "").replace("\n", " ").strip()
-            summary = (getattr(entry, "summary", "") or "").replace("\n", " ").strip()
-            if "Abstract:" in summary:
-                summary = summary.split("Abstract:", 1)[-1].strip()
+                published = None
+                if getattr(entry, "published_parsed", None):
+                    t = entry.published_parsed
+                    published = datetime(*t[:6], tzinfo=timezone.utc)
+                else:
+                    published = _parse_feed_datetime(getattr(entry, "published", None))
 
-            authors = []
-            if getattr(entry, "authors", None):
-                authors = [a.get("name", "") for a in entry.authors if a.get("name")]
-            elif getattr(entry, "author", None):
-                authors = [entry.author]
+                updated = published
+                if getattr(entry, "updated_parsed", None):
+                    t = entry.updated_parsed
+                    updated = datetime(*t[:6], tzinfo=timezone.utc)
 
-            tags = []
-            if getattr(entry, "tags", None):
-                tags = [t.get("term", "") for t in entry.tags if t.get("term")]
-            if not tags:
-                tags = [category]
+                if published and published < cutoff and days >= 1:
+                    if "show=" in url:
+                        continue
 
-            pdf_url = link.replace("/abs/", "/pdf/")
-            papers.append(
-                Paper(
-                    arxiv_id=arxiv_id,
-                    title=title,
-                    authors=authors,
-                    summary=summary,
-                    categories=tags,
-                    published=published or datetime.now(timezone.utc),
-                    updated=updated or published or datetime.now(timezone.utc),
-                    pdf_url=pdf_url,
-                    abs_url=link if "/abs/" in link else f"https://arxiv.org/abs/{arxiv_id}",
+                title = (getattr(entry, "title", "") or "").replace("\n", " ").strip()
+                summary = (getattr(entry, "summary", "") or "").replace("\n", " ").strip()
+                if "Abstract:" in summary:
+                    summary = summary.split("Abstract:", 1)[-1].strip()
+
+                authors = []
+                if getattr(entry, "authors", None):
+                    authors = [a.get("name", "") for a in entry.authors if a.get("name")]
+                elif getattr(entry, "author", None):
+                    authors = [entry.author]
+
+                tags = []
+                if getattr(entry, "tags", None):
+                    tags = [t.get("term", "") for t in entry.tags if t.get("term")]
+                if not tags:
+                    tags = [category]
+
+                pdf_url = link.replace("/abs/", "/pdf/")
+                papers.append(
+                    Paper(
+                        arxiv_id=arxiv_id,
+                        title=title,
+                        authors=authors,
+                        summary=summary,
+                        categories=tags,
+                        published=published or datetime.now(timezone.utc),
+                        updated=updated or published or datetime.now(timezone.utc),
+                        pdf_url=pdf_url,
+                        abs_url=link if "/abs/" in link else f"https://arxiv.org/abs/{arxiv_id}",
+                    )
                 )
-            )
-            seen.add(arxiv_id)
+                seen.add(arxiv_id)
 
     papers.sort(key=lambda p: p.published, reverse=True)
     return papers
-
 
 def _keyword_api_clause(keywords: list[str], mode: str = "any") -> str:
     parts = []
@@ -304,7 +344,7 @@ def _keyword_api_clause(keywords: list[str], mode: str = "any") -> str:
 
 
 def fetch_from_api(
-    category: str,
+    category: str | list[str],
     target_date: date | None = None,
     days: int = 1,
     max_results: int = 200,
@@ -313,7 +353,7 @@ def fetch_from_api(
 ) -> list[Paper]:
     """
     通过官方 API 按提交日期拉取论文。
-    对 cond-mat / cs / math 等一级分类使用 cat:xxx.*。
+    支持多主题（OR）；对 cond-mat / cs / math 等一级分类使用 cat:xxx.*。
     若提供关键词，则一并写入查询，避免只靠本地二次过滤漏检。
     """
     end = target_date or arxiv_today()
@@ -337,7 +377,6 @@ def fetch_from_api(
 
     return [_result_to_paper(result) for result in client.results(search)]
 
-
 def _merge_papers(*groups: list[Paper]) -> list[Paper]:
     seen: set[str] = set()
     out: list[Paper] = []
@@ -352,39 +391,42 @@ def _merge_papers(*groups: list[Paper]) -> list[Paper]:
 
 
 def fetch_papers(
-    category: str,
+    category: str | list[str] | None = None,
     keywords: list[str] | None = None,
     keyword_mode: str = "any",
     target_date: date | None = None,
     days: int = 1,
     source: str = "auto",
     max_results: int = 200,
+    categories: list[str] | None = None,
 ) -> list[Paper]:
     """
     拉取并筛选论文。
+    category / categories 均可传多个主题。
     source: auto | rss | api
       auto = RSS + API 合并（有关键词时 API 会带关键词检索，避免漏检）
     """
     keywords = keywords or []
-    category = resolve_category(category)
+    cats = resolve_categories(categories if categories is not None else category)
     papers: list[Paper] = []
 
-    if not is_valid_category(category):
+    if not cats:
+        raise ValueError("请至少选择一个主题分类。")
+    bad = [c for c in cats if not is_valid_category(c)]
+    if bad:
         raise ValueError(
-            f"无效的 arXiv 分类代码：{category!r}。"
-            "请在固定分类编辑里选择「凝聚态 (cond-mat)」等标准主题，"
-            "或填写如 cond-mat / cs.LG 的代码。"
+            f"无效的 arXiv 分类代码：{bad!r}。"
+            "请选择「凝聚态 (cond-mat)」等标准主题，或填写如 cond-mat / cs.LG 的代码。"
         )
 
     if source in ("auto", "rss"):
-        papers = fetch_from_rss(category, days=days)
+        papers = fetch_from_rss(cats, days=days)
 
     need_api = source == "api" or source == "auto"
     if need_api:
         try:
-            # 有关键词时：API 端直接检索；无关键词时：补全 RSS 覆盖不足
             api_papers = fetch_from_api(
-                category,
+                cats,
                 target_date=target_date,
                 days=days,
                 max_results=max_results,
