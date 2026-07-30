@@ -12,58 +12,15 @@ from zoneinfo import ZoneInfo
 import arxiv
 import feedparser
 
+from categories_data import (
+    CATEGORIES,
+    CATEGORY_ALIASES,
+    CATEGORY_GROUPS,
+    PARENT_ARCHIVES,
+)
+
 # arXiv 公告时区（美国东部）
 ARXIV_TZ = ZoneInfo("America/New_York")
-
-# 常用学科分类（展示名 -> arXiv category code）
-CATEGORIES: dict[str, str] = {
-    "人工智能 (cs.AI)": "cs.AI",
-    "机器学习 (cs.LG)": "cs.LG",
-    "计算机视觉 (cs.CV)": "cs.CV",
-    "计算与语言 (cs.CL)": "cs.CL",
-    "信息检索 (cs.IR)": "cs.IR",
-    "神经网络与进化计算 (cs.NE)": "cs.NE",
-    "机器人 (cs.RO)": "cs.RO",
-    "密码学与安全 (cs.CR)": "cs.CR",
-    "分布式/并行/集群 (cs.DC)": "cs.DC",
-    "人机交互 (cs.HC)": "cs.HC",
-    "软件工程 (cs.SE)": "cs.SE",
-    "系统与控制 (cs.SY)": "cs.SY",
-    "统计机器学习 (stat.ML)": "stat.ML",
-    "量子物理 (quant-ph)": "quant-ph",
-    "凝聚态 (cond-mat)": "cond-mat",
-    "高能理论 (hep-th)": "hep-th",
-    "数学 (math)": "math",
-    "电气工程 (eess)": "eess",
-    "定量生物 (q-bio)": "q-bio",
-    "定量金融 (q-fin)": "q-fin",
-}
-
-# 中文/别名 -> 标准代码
-CATEGORY_ALIASES: dict[str, str] = {
-    "凝聚态": "cond-mat",
-    "人工智能": "cs.AI",
-    "机器学习": "cs.LG",
-    "计算机视觉": "cs.CV",
-    "量子物理": "quant-ph",
-    "高能理论": "hep-th",
-    "数学": "math",
-}
-
-# 含有子类的一级 archive；API 需用 cat:xxx.*
-PARENT_ARCHIVES = {
-    "cond-mat",
-    "cs",
-    "math",
-    "astro-ph",
-    "physics",
-    "nlin",
-    "q-bio",
-    "q-fin",
-    "stat",
-    "eess",
-    "econ",
-}
 
 RSS_NEW = "https://rss.arxiv.org/rss/{category}"
 RSS_RECENT = "https://rss.arxiv.org/rss/{category}?show=2000"

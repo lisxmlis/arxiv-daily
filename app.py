@@ -18,8 +18,9 @@ from fetcher import (
     is_valid_category,
     papers_to_markdown,
     resolve_categories,
-    resolve_category,
 )
+from categories_data import CATEGORY_GROUPS
+
 from presets import (
     create_preset,
     delete_preset,
@@ -75,10 +76,6 @@ st.markdown(
 )
 
 
-def _label_to_category(label: str) -> str:
-    return CATEGORIES.get(label, label)
-
-
 def _category_to_label(code: str) -> str:
     for label, cat in CATEGORIES.items():
         if cat == code:
@@ -94,6 +91,58 @@ def _codes_from_labels_and_custom(labels: list[str], custom_raw: str) -> list[st
     codes = [CATEGORIES[l] for l in labels if l in CATEGORIES]
     codes.extend(_parse_custom_codes(custom_raw))
     return resolve_categories(codes)
+
+
+def _category_multiselect(
+    *,
+    key_prefix: str,
+    default_codes: list[str] | None = None,
+) -> list[str]:
+    """分组 + 多选主题，返回分类代码列表。"""
+    default_codes = list(default_codes or ["cs.LG"])
+    group_names = ["全部类别", *CATEGORY_GROUPS.keys()]
+    group = st.selectbox(
+        "主题分组",
+        options=group_names,
+        index=0,
+        key=f"{key_prefix}_group",
+        help="先选分组缩小范围，再多选具体主题。已覆盖 arXiv 官方全部 155 个子类 + 一级大类。",
+    )
+    if group == "全部类别":
+        options = list(CATEGORIES.keys())
+    else:
+        options = [x for x in CATEGORY_GROUPS.get(group, []) if x in CATEGORIES]
+        for code in default_codes:
+            label = _category_to_label(code)
+            if label in CATEGORIES and label not in options:
+                options.append(label)
+
+    default_labels: list[str] = []
+    for code in default_codes:
+        label = _category_to_label(code)
+        if label in options:
+            default_labels.append(label)
+
+    selected_labels = st.multiselect(
+        "主题分类（可多选）",
+        options=options,
+        default=default_labels,
+        key=f"{key_prefix}_cats",
+        help="可同时选择多个主题；一级大类（如凝聚态全部 cond-mat）会覆盖其下全部子类。",
+    )
+    selected_codes = [CATEGORIES[l] for l in selected_labels if l in CATEGORIES]
+
+    # 当前分组未显示、但仍属于默认/已选的自定义代码
+    visible_codes = {CATEGORIES[l] for l in options if l in CATEGORIES}
+    leftover = [c for c in default_codes if c not in selected_codes and c not in visible_codes]
+    custom_default = ", ".join(leftover)
+    custom_raw = st.text_input(
+        "额外自定义分类代码（可选，逗号分隔）",
+        value=custom_default,
+        placeholder="例如 cond-mat.str-el, quant-ph",
+        key=f"{key_prefix}_custom",
+    )
+    return _codes_from_labels_and_custom(selected_labels, custom_raw)
 
 
 def _run_fetch(
@@ -246,33 +295,14 @@ def _edit_preset_form(store: dict, preset: dict) -> None:
     pid = preset["id"]
     name = st.text_input("名称", value=preset["name"], key=f"edit_name_{pid}")
 
-    all_labels = list(CATEGORIES.keys())
     current_codes = resolve_categories(
         preset.get("categories") or preset.get("category"),
         preset.get("category_labels") or preset.get("category_label"),
     )
-    default_labels = [_category_to_label(c) for c in current_codes]
-    default_labels = [l for l in default_labels if l in all_labels]
-    if not default_labels and current_codes:
-        # 自定义代码不在列表里时，默认不预勾选下拉项
-        default_labels = []
-
-    selected_labels = st.multiselect(
-        "主题分类（可多选）",
-        options=all_labels,
-        default=default_labels,
-        key=f"edit_cats_{pid}",
-        help="可同时选择多个 arXiv 主题，结果会合并去重。",
+    categories = _category_multiselect(
+        key_prefix=f"edit_{pid}",
+        default_codes=current_codes,
     )
-    known_codes = {CATEGORIES[l] for l in default_labels}
-    custom_default = ", ".join(c for c in current_codes if c not in known_codes)
-    custom_cat = st.text_input(
-        "额外自定义分类代码（可选，逗号分隔）",
-        value=custom_default,
-        placeholder="例如 quant-ph, hep-th",
-        key=f"edit_custom_{pid}",
-    )
-    categories = _codes_from_labels_and_custom(selected_labels, custom_cat)
 
     st.markdown("**关键词列表**")
     keywords = list(preset.get("keywords") or [])
@@ -354,9 +384,7 @@ def _edit_preset_form(store: dict, preset: dict) -> None:
         else:
             preset["name"] = name.strip() or preset["name"]
             preset["categories"] = categories
-            preset["category_labels"] = [
-                _category_to_label(c) for c in categories
-            ]
+            preset["category_labels"] = [_category_to_label(c) for c in categories]
             preset["category"] = categories[0]
             preset["category_label"] = preset["category_labels"][0]
             preset["keywords"] = keywords
@@ -376,19 +404,7 @@ def _edit_preset_form(store: dict, preset: dict) -> None:
 
 def _create_preset_form(store: dict) -> None:
     name = st.text_input("名称", value="我的研究兴趣", key="new_preset_name")
-    selected_labels = st.multiselect(
-        "主题分类（可多选）",
-        options=list(CATEGORIES.keys()),
-        default=["机器学习 (cs.LG)"],
-        key="new_cats",
-        help="可同时选择多个 arXiv 主题。",
-    )
-    custom_cat = st.text_input(
-        "额外自定义分类代码（可选，逗号分隔）",
-        placeholder="例如 quant-ph, hep-th",
-        key="new_custom",
-    )
-    categories = _codes_from_labels_and_custom(selected_labels, custom_cat)
+    categories = _category_multiselect(key_prefix="new", default_codes=["cs.LG"])
     kw_raw = st.text_input(
         "初始关键词（逗号分隔）",
         placeholder="spintronics, van der Waals, neuromorphic",
@@ -425,20 +441,7 @@ def _create_preset_form(store: dict) -> None:
 
 def _sidebar_manual(store: dict) -> None:
     st.subheader("手动筛选")
-    selected_labels = st.multiselect(
-        "主题分类（可多选）",
-        options=list(CATEGORIES.keys()),
-        default=["机器学习 (cs.LG)"],
-        key="manual_cats",
-        help="可同时选择多个 arXiv 主题，结果会合并去重。",
-    )
-    custom_cat = st.text_input(
-        "额外自定义分类代码（可选，逗号分隔）",
-        placeholder="例如 cs.LG, hep-th",
-        help="可追加不在上方列表中的分类代码。",
-        key="manual_custom",
-    )
-    categories = _codes_from_labels_and_custom(selected_labels, custom_cat)
+    categories = _category_multiselect(key_prefix="manual", default_codes=["cs.LG"])
 
     today = arxiv_today()
     target = st.date_input("目标日期（arXiv 东部时区）", value=today, key="manual_date")
