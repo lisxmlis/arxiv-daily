@@ -43,19 +43,25 @@ st.markdown(
 <style>
     .block-container { padding-top: 1.5rem; max-width: 1100px; }
     .paper-card {
-        border: 1px solid #e6e8eb;
+        border: 1px solid #e6e8eb !important;
         border-radius: 10px;
         padding: 1rem 1.2rem;
         margin-bottom: 0.9rem;
-        background: #fafbfc;
+        background: #ffffff !important;
+        color: #1f2937 !important;
     }
-    .paper-title { font-size: 1.05rem; font-weight: 650; margin-bottom: 0.35rem; }
-    .meta { color: #5b6570; font-size: 0.9rem; margin-bottom: 0.45rem; }
-    .abs { color: #2b3036; font-size: 0.95rem; line-height: 1.55; }
+    .paper-title {
+        font-size: 1.05rem;
+        font-weight: 650;
+        margin-bottom: 0.35rem;
+        color: #111827 !important;
+    }
+    .meta { color: #5b6570 !important; font-size: 0.9rem; margin-bottom: 0.45rem; }
+    .abs { color: #2b3036 !important; font-size: 0.95rem; line-height: 1.55; }
     .tag {
         display: inline-block;
-        background: #eef2ff;
-        color: #3730a3;
+        background: #eef2ff !important;
+        color: #3730a3 !important;
         border-radius: 6px;
         padding: 0.1rem 0.45rem;
         margin-right: 0.3rem;
@@ -63,8 +69,8 @@ st.markdown(
     }
     .kw-chip {
         display: inline-block;
-        background: #ecfdf5;
-        color: #065f46;
+        background: #ecfdf5 !important;
+        color: #065f46 !important;
         border-radius: 6px;
         padding: 0.15rem 0.5rem;
         margin: 0.15rem 0.25rem 0.15rem 0;
