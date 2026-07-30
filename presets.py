@@ -8,6 +8,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from fetcher import resolve_category
+
 PRESETS_PATH = Path(__file__).resolve().parent / "presets.json"
 
 DEFAULT_STORE: dict[str, Any] = {
@@ -31,6 +33,24 @@ def _empty_preset(name: str = "我的固定分类") -> dict[str, Any]:
     }
 
 
+def _normalize_preset(p: dict[str, Any]) -> dict[str, Any]:
+    base = _empty_preset()
+    base.update({k: v for k, v in p.items() if k in base})
+    if not base.get("id"):
+        base["id"] = uuid.uuid4().hex[:12]
+    if not isinstance(base.get("keywords"), list):
+        base["keywords"] = []
+    base["keywords"] = [str(k).strip() for k in base["keywords"] if str(k).strip()]
+    # 纠正错误分类代码（如误存成 01、中文名等）
+    base["category"] = resolve_category(
+        base.get("category", ""),
+        base.get("category_label", "") or base.get("name", ""),
+    )
+    if base.get("name") and not base.get("category_label"):
+        base["category_label"] = base["name"]
+    return base
+
+
 def load_store() -> dict[str, Any]:
     if not PRESETS_PATH.exists():
         store = deepcopy(DEFAULT_STORE)
@@ -51,20 +71,9 @@ def load_store() -> dict[str, Any]:
     data.setdefault("version", 1)
     data.setdefault("last_preset_id", None)
     data.setdefault("presets", [])
-    # 规范化每条预设
-    cleaned = []
-    for p in data["presets"]:
-        if not isinstance(p, dict):
-            continue
-        base = _empty_preset()
-        base.update({k: v for k, v in p.items() if k in base})
-        if not base.get("id"):
-            base["id"] = uuid.uuid4().hex[:12]
-        if not isinstance(base.get("keywords"), list):
-            base["keywords"] = []
-        base["keywords"] = [str(k).strip() for k in base["keywords"] if str(k).strip()]
-        cleaned.append(base)
+    cleaned = [_normalize_preset(p) for p in data["presets"] if isinstance(p, dict)]
     data["presets"] = cleaned
+    save_store(data)
     return data
 
 
@@ -89,6 +98,7 @@ def get_preset(store: dict[str, Any], preset_id: str | None) -> dict[str, Any] |
 
 
 def upsert_preset(store: dict[str, Any], preset: dict[str, Any]) -> dict[str, Any]:
+    preset = _normalize_preset(preset)
     presets = list_presets(store)
     for i, p in enumerate(presets):
         if p["id"] == preset["id"]:
@@ -127,7 +137,7 @@ def create_preset(
     max_results: int = 100,
 ) -> dict[str, Any]:
     preset = _empty_preset(name.strip() or "我的固定分类")
-    preset["category"] = category
+    preset["category"] = resolve_category(category, category_label or name)
     preset["category_label"] = category_label or category
     preset["keywords"] = [k.strip() for k in (keywords or []) if k.strip()]
     preset["keyword_mode"] = keyword_mode

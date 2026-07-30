@@ -15,7 +15,9 @@ from fetcher import (
     Paper,
     arxiv_today,
     fetch_papers,
+    is_valid_category,
     papers_to_markdown,
+    resolve_category,
 )
 from presets import (
     create_preset,
@@ -175,8 +177,22 @@ def _sidebar_presets(store: dict) -> None:
         preset = get_preset(store, selected_id)
         assert preset is not None
 
-        st.markdown(f"**主题**：`{preset['category']}`")
-        st.markdown("**关键词**：")
+        cat_code = resolve_category(
+            preset.get("category", ""),
+            preset.get("category_label", ""),
+        )
+        st.write("**主题代码：**", cat_code)
+        if not is_valid_category(cat_code):
+            st.error(
+                f"分类代码无效：{cat_code!r}。请点下方「编辑此固定分类」，"
+                "重新选择「凝聚态 (cond-mat)」并保存。"
+            )
+        elif cat_code != preset.get("category"):
+            st.warning(f"已自动纠正分类：{preset.get('category')!r} → {cat_code}")
+            preset["category"] = cat_code
+            upsert_preset(store, preset)
+
+        st.markdown("**关键词：**")
         _render_preset_keywords(preset.get("keywords") or [])
         st.caption(
             f"匹配方式：{'命中任一' if preset.get('keyword_mode') == 'any' else '全部命中'}"
@@ -185,13 +201,13 @@ def _sidebar_presets(store: dict) -> None:
 
         if st.button("一键筛选", type="primary", use_container_width=True, key="preset_fetch"):
             _run_fetch(
-                category=preset["category"],
+                category=cat_code,
                 keywords=list(preset.get("keywords") or []),
                 keyword_mode=preset.get("keyword_mode", "any"),
                 target=arxiv_today(),
                 days=int(preset.get("days", 2)),
                 source=preset.get("source", "auto"),
-                max_results=int(preset.get("max_results", 100)),
+                max_results=max(int(preset.get("max_results", 100)), 200),
                 preset_name=preset["name"],
             )
 
@@ -296,18 +312,22 @@ def _edit_preset_form(store: dict, preset: dict) -> None:
 
     b1, b2 = st.columns(2)
     if b1.button("保存修改", type="primary", use_container_width=True, key=f"save_{pid}"):
-        preset["name"] = name.strip() or preset["name"]
-        preset["category"] = category
-        preset["category_label"] = cat_label if not custom_cat.strip() else category
-        preset["keywords"] = keywords
-        preset["keyword_mode"] = keyword_mode
-        preset["days"] = days
-        preset["source"] = source
-        preset["max_results"] = max_results
-        upsert_preset(store, preset)
-        set_last_preset(store, pid)
-        st.success("已保存。")
-        st.rerun()
+        resolved = resolve_category(category, cat_label)
+        if not is_valid_category(resolved):
+            st.error(f"分类代码无效：{resolved!r}，请从下拉框选择标准主题。")
+        else:
+            preset["name"] = name.strip() or preset["name"]
+            preset["category"] = resolved
+            preset["category_label"] = cat_label if not custom_cat.strip() else resolved
+            preset["keywords"] = keywords
+            preset["keyword_mode"] = keyword_mode
+            preset["days"] = days
+            preset["source"] = source
+            preset["max_results"] = max_results
+            upsert_preset(store, preset)
+            set_last_preset(store, pid)
+            st.success(f"已保存（主题代码 {resolved}）。")
+            st.rerun()
 
     if b2.button("删除此分类", use_container_width=True, key=f"delete_{pid}"):
         delete_preset(store, pid)
@@ -335,17 +355,21 @@ def _create_preset_form(store: dict) -> None:
     days = st.slider("回溯天数", 1, 7, 2, key="new_days")
 
     if st.button("创建固定分类", type="primary", use_container_width=True, key="create_preset"):
-        create_preset(
-            store,
-            name=name,
-            category=category,
-            category_label=cat_label if not custom_cat.strip() else category,
-            keywords=keywords,
-            keyword_mode=keyword_mode,
-            days=days,
-        )
-        st.success(f"已创建「{name}」。")
-        st.rerun()
+        resolved = resolve_category(category, cat_label)
+        if not is_valid_category(resolved):
+            st.error(f"分类代码无效：{resolved!r}，请从下拉框选择标准主题。")
+        else:
+            create_preset(
+                store,
+                name=name,
+                category=resolved,
+                category_label=cat_label if not custom_cat.strip() else resolved,
+                keywords=keywords,
+                keyword_mode=keyword_mode,
+                days=days,
+            )
+            st.success(f"已创建「{name}」（主题 {resolved}）。")
+            st.rerun()
 
 
 def _sidebar_manual(store: dict) -> None:

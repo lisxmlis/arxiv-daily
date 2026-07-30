@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
@@ -37,8 +39,88 @@ CATEGORIES: dict[str, str] = {
     "定量金融 (q-fin)": "q-fin",
 }
 
+# 中文/别名 -> 标准代码
+CATEGORY_ALIASES: dict[str, str] = {
+    "凝聚态": "cond-mat",
+    "人工智能": "cs.AI",
+    "机器学习": "cs.LG",
+    "计算机视觉": "cs.CV",
+    "量子物理": "quant-ph",
+    "高能理论": "hep-th",
+    "数学": "math",
+}
+
+# 含有子类的一级 archive；API 需用 cat:xxx.*
+PARENT_ARCHIVES = {
+    "cond-mat",
+    "cs",
+    "math",
+    "astro-ph",
+    "physics",
+    "nlin",
+    "q-bio",
+    "q-fin",
+    "stat",
+    "eess",
+    "econ",
+}
+
 RSS_NEW = "https://rss.arxiv.org/rss/{category}"
-RSS_RECENT = "https://rss.arxiv.org/rss/{category}?show=100"
+RSS_RECENT = "https://rss.arxiv.org/rss/{category}?show=2000"
+
+_ARXIV_CAT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)?$")
+
+
+def normalize_text(text: str) -> str:
+    """小写 + 去掉重音（Moiré -> moire），便于关键词匹配。"""
+    text = unicodedata.normalize("NFKD", text or "")
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text.lower()
+
+
+def resolve_category(category: str, category_label: str = "") -> str:
+    """把界面上的分类名/别名解析成 arXiv 代码。"""
+    raw = (category or "").strip()
+    label = (category_label or "").strip()
+
+    if raw in CATEGORIES.values():
+        return raw
+    if raw in CATEGORIES:
+        return CATEGORIES[raw]
+    if raw in CATEGORY_ALIASES:
+        return CATEGORY_ALIASES[raw]
+
+    # 从「凝聚态 (cond-mat)」提取
+    for text in (label, raw):
+        m = re.search(r"\(([^)]+)\)\s*$", text)
+        if m:
+            code = m.group(1).strip()
+            if _ARXIV_CAT_RE.match(code):
+                return code
+        if text in CATEGORY_ALIASES:
+            return CATEGORY_ALIASES[text]
+        for disp, code in CATEGORIES.items():
+            if text == disp or text in disp:
+                return code
+
+    if _ARXIV_CAT_RE.match(raw):
+        return raw
+    return raw
+
+
+def is_valid_category(category: str) -> bool:
+    return bool(_ARXIV_CAT_RE.match((category or "").strip()))
+
+
+def api_category_clause(category: str) -> str:
+    """构造 API 分类子句；一级 archive 使用 cat:xxx.* 覆盖子类。"""
+    cat = resolve_category(category)
+    if cat in PARENT_ARCHIVES:
+        return f"cat:{cat}.*"
+    if cat.endswith(".*"):
+        return f"cat:{cat}"
+    # cs.LG 等叶子分类
+    return f"cat:{cat}"
 
 
 @dataclass
@@ -55,17 +137,19 @@ class Paper:
 
     def matches_keywords(self, keywords: Iterable[str], mode: str = "any") -> bool:
         """mode: any = 任一命中；all = 全部命中。"""
-        keys = [k.strip().lower() for k in keywords if k and k.strip()]
+        keys = [normalize_text(k.strip()) for k in keywords if k and k.strip()]
         if not keys:
             return True
-        haystack = " ".join(
-            [
-                self.title,
-                self.summary,
-                " ".join(self.authors),
-                " ".join(self.categories),
-            ]
-        ).lower()
+        haystack = normalize_text(
+            " ".join(
+                [
+                    self.title,
+                    self.summary,
+                    " ".join(self.authors),
+                    " ".join(self.categories),
+                ]
+            )
+        )
         hits = [k in haystack for k in keys]
         return all(hits) if mode == "all" else any(hits)
 
@@ -89,7 +173,6 @@ def _parse_feed_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        # feedparser 已解析时常用 struct_time；这里兼容 ISO / RFC
         parsed = feedparser._parse_date(value)  # type: ignore[attr-defined]
         if parsed:
             return datetime(*parsed[:6], tzinfo=timezone.utc)
@@ -108,9 +191,22 @@ def _parse_feed_datetime(value: str | None) -> datetime | None:
 
 
 def _id_from_link(link: str) -> str:
-    # https://arxiv.org/abs/2401.12345v1 -> 2401.12345
     part = link.rstrip("/").split("/")[-1]
     return part.split("v")[0]
+
+
+def _result_to_paper(result: arxiv.Result) -> Paper:
+    return Paper(
+        arxiv_id=result.get_short_id().split("v")[0],
+        title=result.title.replace("\n", " ").strip(),
+        authors=[a.name for a in result.authors],
+        summary=result.summary.replace("\n", " ").strip(),
+        categories=list(result.categories),
+        published=result.published,
+        updated=result.updated,
+        pdf_url=result.pdf_url,
+        abs_url=result.entry_id,
+    )
 
 
 def fetch_from_rss(category: str, days: int = 1) -> list[Paper]:
@@ -118,6 +214,7 @@ def fetch_from_rss(category: str, days: int = 1) -> list[Paper]:
     通过 arXiv RSS 获取某分类的新论文（优先 new 公告源）。
     days>1 时回退到 recent 源并按日期过滤。
     """
+    category = resolve_category(category)
     urls = [RSS_NEW.format(category=category)]
     if days > 1:
         urls.append(RSS_RECENT.format(category=category))
@@ -149,13 +246,11 @@ def fetch_from_rss(category: str, days: int = 1) -> list[Paper]:
                 updated = datetime(*t[:6], tzinfo=timezone.utc)
 
             if published and published < cutoff and days >= 1:
-                # new 源通常已是当日；recent 源需要裁剪
                 if "show=" in url:
                     continue
 
             title = (getattr(entry, "title", "") or "").replace("\n", " ").strip()
             summary = (getattr(entry, "summary", "") or "").replace("\n", " ").strip()
-            # RSS 摘要常带 "arXiv:xxx Abstract: "
             if "Abstract:" in summary:
                 summary = summary.split("Abstract:", 1)[-1].strip()
 
@@ -191,23 +286,47 @@ def fetch_from_rss(category: str, days: int = 1) -> list[Paper]:
     return papers
 
 
+def _keyword_api_clause(keywords: list[str], mode: str = "any") -> str:
+    parts = []
+    for k in keywords:
+        k = k.strip()
+        if not k:
+            continue
+        # 短语加引号；单词语可不加
+        if " " in k or "-" in k:
+            parts.append(f'all:"{k}"')
+        else:
+            parts.append(f"all:{k}")
+    if not parts:
+        return ""
+    joiner = " AND " if mode == "all" else " OR "
+    return f"({joiner.join(parts)})"
+
+
 def fetch_from_api(
     category: str,
     target_date: date | None = None,
     days: int = 1,
     max_results: int = 200,
+    keywords: list[str] | None = None,
+    keyword_mode: str = "any",
 ) -> list[Paper]:
     """
     通过官方 API 按提交日期拉取论文。
-    submittedDate 区间使用东部时区的日历日。
+    对 cond-mat / cs / math 等一级分类使用 cat:xxx.*。
+    若提供关键词，则一并写入查询，避免只靠本地二次过滤漏检。
     """
     end = target_date or arxiv_today()
     start = end - timedelta(days=max(days - 1, 0))
-    # arXiv API 日期格式 YYYYMMDDHHMM（按 UTC 存储，这里用整天窗口）
     start_s = start.strftime("%Y%m%d0000")
     end_s = end.strftime("%Y%m%d2359")
 
-    query = f"cat:{category} AND submittedDate:[{start_s} TO {end_s}]"
+    cat_clause = api_category_clause(category)
+    query = f"{cat_clause} AND submittedDate:[{start_s} TO {end_s}]"
+    kw_clause = _keyword_api_clause(keywords or [], mode=keyword_mode)
+    if kw_clause:
+        query = f"{query} AND {kw_clause}"
+
     client = arxiv.Client(page_size=min(100, max_results), delay_seconds=3.0, num_retries=3)
     search = arxiv.Search(
         query=query,
@@ -216,22 +335,20 @@ def fetch_from_api(
         sort_order=arxiv.SortOrder.Descending,
     )
 
-    papers: list[Paper] = []
-    for result in client.results(search):
-        papers.append(
-            Paper(
-                arxiv_id=result.get_short_id().split("v")[0],
-                title=result.title.replace("\n", " ").strip(),
-                authors=[a.name for a in result.authors],
-                summary=result.summary.replace("\n", " ").strip(),
-                categories=list(result.categories),
-                published=result.published,
-                updated=result.updated,
-                pdf_url=result.pdf_url,
-                abs_url=result.entry_id,
-            )
-        )
-    return papers
+    return [_result_to_paper(result) for result in client.results(search)]
+
+
+def _merge_papers(*groups: list[Paper]) -> list[Paper]:
+    seen: set[str] = set()
+    out: list[Paper] = []
+    for group in groups:
+        for p in group:
+            if p.arxiv_id in seen:
+                continue
+            seen.add(p.arxiv_id)
+            out.append(p)
+    out.sort(key=lambda p: p.published, reverse=True)
+    return out
 
 
 def fetch_papers(
@@ -246,30 +363,38 @@ def fetch_papers(
     """
     拉取并筛选论文。
     source: auto | rss | api
-      auto = 先 RSS（快），结果少时再补 API
+      auto = RSS + API 合并（有关键词时 API 会带关键词检索，避免漏检）
     """
     keywords = keywords or []
+    category = resolve_category(category)
     papers: list[Paper] = []
+
+    if not is_valid_category(category):
+        raise ValueError(
+            f"无效的 arXiv 分类代码：{category!r}。"
+            "请在固定分类编辑里选择「凝聚态 (cond-mat)」等标准主题，"
+            "或填写如 cond-mat / cs.LG 的代码。"
+        )
 
     if source in ("auto", "rss"):
         papers = fetch_from_rss(category, days=days)
 
-    if source == "api" or (source == "auto" and len(papers) < 5):
+    need_api = source == "api" or source == "auto"
+    if need_api:
         try:
+            # 有关键词时：API 端直接检索；无关键词时：补全 RSS 覆盖不足
             api_papers = fetch_from_api(
                 category,
                 target_date=target_date,
                 days=days,
                 max_results=max_results,
+                keywords=keywords if keywords else None,
+                keyword_mode=keyword_mode,
             )
             if source == "api":
                 papers = api_papers
             else:
-                seen = {p.arxiv_id for p in papers}
-                for p in api_papers:
-                    if p.arxiv_id not in seen:
-                        papers.append(p)
-                        seen.add(p.arxiv_id)
+                papers = _merge_papers(papers, api_papers)
         except Exception:
             if source == "api":
                 raise
